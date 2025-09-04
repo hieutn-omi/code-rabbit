@@ -1,0 +1,114 @@
+name: CodeRabbit Pro – Policy Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [code-rabbit, test]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    name: Enforce Code Review Policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Optional: surface the style guide in logs (helps verify it's present)
+      - name: Verify styleguide.md presence
+        run: |
+          if [ ! -f styleguide.md ]; then
+            echo "::warning ::styleguide.md not found at repo root"
+          else
+            echo "styleguide.md found."
+          fi
+
+      # Wait briefly so the CodeRabbit Pro app can finish posting comments after PR syncs
+      - name: Small delay (let bot comment)
+        run: sleep 8
+
+      # Collect PR review comments + issue comments and compute counts:
+      #   - [critical], [high], [medium] at the START of the comment body.
+      #   - We look for comments authored by bot accounts OR with our tag pattern.
+      - name: Evaluate CodeRabbit findings
+        id: evaluate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) {
+              core.setFailed('No pull_request in context.');
+              return;
+            }
+
+            // Pull both review comments (inline) and issue comments (top-level)
+            const [reviewComments, issueComments] = await Promise.all([
+              github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: pr, per_page: 100 }),
+              github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pr, per_page: 100 }),
+            ]);
+
+            const TAG = /^\s*\[(critical|high|medium)\]/i;
+            const isFromBotOrTagged = c =>
+              (c.user?.type === 'Bot' || c.user?.login?.endsWith('[bot]')) ||
+              TAG.test(c.body || '');
+
+            const comments = [...reviewComments, ...issueComments].filter(isFromBotOrTagged);
+
+            let critical = 0, high = 0, medium = 0;
+            for (const c of comments) {
+              const m = (c.body || '').match(TAG);
+              if (!m) continue;
+              const lvl = m[1].toLowerCase();
+              if (lvl === 'critical') critical++;
+              else if (lvl === 'high') high++;
+              else if (lvl === 'medium') medium++;
+            }
+
+            core.info(`Found: critical=${critical}, high=${high}, medium=${medium}`);
+
+            core.setOutput('critical', String(critical));
+            core.setOutput('high', String(high));
+            core.setOutput('medium', String(medium));
+
+            // Fail policy:
+            //   - fail if (>3 medium) OR (>0 critical/high)
+            if (medium > 3 || (critical + high) > 0) {
+              core.setFailed(`Policy failed: medium=${medium} (>3?) or critical+high=${critical+high} (>0?)`);
+            }
+
+      # (Optional) Post a summary comment with the counts
+      - name: Comment summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) return;
+
+            const critical = core.getInput('critical', { required: false }) || core.getState('critical') || '${{ steps.evaluate.outputs.critical }}';
+            const high = core.getInput('high', { required: false }) || core.getState('high') || '${{ steps.evaluate.outputs.high }}';
+            const medium = core.getInput('medium', { required: false }) || core.getState('medium') || '${{ steps.evaluate.outputs.medium }}';
+
+            const body = [
+              '### Code Review Policy Check',
+              '',
+              `- critical: **${critical}**`,
+              `- high: **${high}**`,
+              `- medium: **${medium}**`,
+              '',
+              '> Fail when (medium > 3) OR (critical+high > 0).'
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: pr, body
+            });

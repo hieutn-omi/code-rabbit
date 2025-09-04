@@ -1,0 +1,44 @@
+# .coderabbit.yaml for CodeRabbit Pro
+reviews:
+  enabled: true
+  instructions: |
+    Use the repository STYLE GUIDE below as the primary reference for naming, formatting, design, testing.
+    If `styleguide.md` is missing, follow standard best practices for the detected programming language (e.g., PEP 8 for Python, Airbnb style for JavaScript).
+    For every review comment, start the first line with exactly one of:
+    [critical]  for correctness/security/data loss/broken API/migration risks
+    [high]      for performance/concurrency/reliability/public API changes/blocking test gaps
+    [medium]    for style/consistency/minor refactors/non-blocking improvements
+
+    Keep comments focused to one issue each. Provide concrete fixes and small code snippets where helpful.
+    When relevant, cite the specific styleguide rule (quote a short line).
+
+    STYLE GUIDE (verbatim):
+    ---
+    {{ file("styleguide.md") }}
+    ---
+
+  path_instructions:
+    - path: "**/*.html"
+      instructions: |
+        Ensure all interactive HTML elements (e.g., <button>, <a>) have appropriate ARIA attributes (e.g., `aria-label`, `role`) to comply with accessibility standards (SG-050, SG-052). For example:
+        - `<button>Click me</button>` should be `<button aria-label="Click me">Click me</button>` if no other accessible name is provided.
+        - Cite SG-050: "All interactive elements must meet accessibility (a11y)."
+    - path: "**/*.svelte"
+      instructions: |
+        Follow Svelte-specific rules in `styleguide.md` (SG-020 to SG-052). Ensure HTML markup within `<svelte:body>` or template sections complies with accessibility standards (SG-050, SG-052).
+
+summary:
+  enabled: true
+  template: |
+    **PR Summary**
+    - What changed and why
+    - Risky areas to test
+    - Suggested next steps
+    - Release notes (if any)
+    - Critical issues: {{ critical_count }}
+    - High issues: {{ high_count }}
+    - Medium issues: {{ medium_count }}
+
+files:
+  include: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py", "**/*.svelte", "**/*.html"]
+  exclude: ["**/dist/**", "**/build/**", "**/node_modules/**"]
