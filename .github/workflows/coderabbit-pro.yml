@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write  # Thêm quyền để quản lý nhãn
+
+env:
+  MAX_MEDIUM: 3
+  MAX_CRITICAL_HIGH: 0
 
 jobs:
   gate:
@@ -20,7 +25,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Optional: surface the style guide in logs (helps verify it's present)
       - name: Verify styleguide.md presence
         run: |
           if [ ! -f styleguide.md ]; then
@@ -29,13 +33,9 @@ jobs:
             echo "styleguide.md found."
           fi
 
-      # Wait briefly so the CodeRabbit Pro app can finish posting comments after PR syncs
       - name: Small delay (let bot comment)
-        run: sleep 8
+        run: sleep 15
 
-      # Collect PR review comments + issue comments and compute counts:
-      #   - [critical], [high], [medium] at the START of the comment body.
-      #   - We look for comments authored by bot accounts OR with our tag pattern.
       - name: Evaluate CodeRabbit findings
         id: evaluate
         uses: actions/github-script@v7
@@ -45,20 +45,17 @@ jobs:
             const repo = context.repo.repo;
             const pr = context.payload.pull_request?.number;
             if (!pr) {
-              core.setFailed('No pull_request in context.');
+              core.setFailed('No pull_request in context. Ensure this workflow is triggered by a pull request event.');
               return;
             }
 
-            // Pull both review comments (inline) and issue comments (top-level)
             const [reviewComments, issueComments] = await Promise.all([
               github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: pr, per_page: 100 }),
               github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pr, per_page: 100 }),
             ]);
 
             const TAG = /^\s*\[(critical|high|medium)\]/i;
-            const isFromBotOrTagged = c =>
-              (c.user?.type === 'Bot' || c.user?.login?.endsWith('[bot]')) ||
-              TAG.test(c.body || '');
+            const isFromBotOrTagged = c => c.user?.login === 'coderabbitai[bot]' || TAG.test(c.body || '');
 
             const comments = [...reviewComments, ...issueComments].filter(isFromBotOrTagged);
 
@@ -78,13 +75,55 @@ jobs:
             core.setOutput('high', String(high));
             core.setOutput('medium', String(medium));
 
-            // Fail policy:
-            //   - fail if (>3 medium) OR (>0 critical/high)
-            if (medium > 3 || (critical + high) > 0) {
-              core.setFailed(`Policy failed: medium=${medium} (>3?) or critical+high=${critical+high} (>0?)`);
+            const maxMedium = Number(process.env.MAX_MEDIUM) || 3;
+            const maxCriticalHigh = Number(process.env.MAX_CRITICAL_HIGH) || 0;
+            if (medium > maxMedium || (critical + high) > maxCriticalHigh) {
+              core.setFailed(`Policy failed: medium=${medium} (>${maxMedium}?) or critical+high=${critical+high} (>${maxCriticalHigh}?)`);
             }
 
-      # (Optional) Post a summary comment with the counts
+      - name: Add labels based on CodeRabbit findings
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) {
+              core.warning('No pull_request in context. Skipping labeling.');
+              return;
+            }
+
+            const critical = Number('${{ steps.evaluate.outputs.critical }}');
+            const high = Number('${{ steps.evaluate.outputs.high }}');
+            const medium = Number('${{ steps.evaluate.outputs.medium }}');
+            const maxMedium = Number(process.env.MAX_MEDIUM) || 3;
+            const maxCriticalHigh = Number(process.env.MAX_CRITICAL_HIGH) || 0;
+
+            const labelsToAdd = [];
+            if (critical > 0) labelsToAdd.push('critical-issue');
+            if (high > 0) labelsToAdd.push('high-issue');
+            if (medium > maxMedium) labelsToAdd.push('medium-issue');
+            if (medium > maxMedium || (critical + high) > maxCriticalHigh) {
+              labelsToAdd.push('needs-changes');
+            }
+
+            if (labelsToAdd.length > 0) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: pr,
+                  labels: labelsToAdd
+                });
+                core.info(`Added labels: ${labelsToAdd.join(', ')}`);
+              } catch (error) {
+                core.warning(`Failed to add labels: ${error.message}`);
+              }
+            } else {
+              core.info('No labels to add.');
+            }
+
       - name: Comment summary
         if: always()
         uses: actions/github-script@v7
@@ -93,11 +132,14 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const pr = context.payload.pull_request?.number;
-            if (!pr) return;
+            if (!pr) {
+              core.warning('No pull_request in context. Skipping comment.');
+              return;
+            }
 
-            const critical = core.getInput('critical', { required: false }) || core.getState('critical') || '${{ steps.evaluate.outputs.critical }}';
-            const high = core.getInput('high', { required: false }) || core.getState('high') || '${{ steps.evaluate.outputs.high }}';
-            const medium = core.getInput('medium', { required: false }) || core.getState('medium') || '${{ steps.evaluate.outputs.medium }}';
+            const critical = '${{ steps.evaluate.outputs.critical }}';
+            const high = '${{ steps.evaluate.outputs.high }}';
+            const medium = '${{ steps.evaluate.outputs.medium }}';
 
             const body = [
               '### Code Review Policy Check',
@@ -106,9 +148,13 @@ jobs:
               `- high: **${high}**`,
               `- medium: **${medium}**`,
               '',
-              '> Fail when (medium > 3) OR (critical+high > 0).'
+              `> Fail when (medium > ${process.env.MAX_MEDIUM || 3}) OR (critical+high > ${process.env.MAX_CRITICAL_HIGH || 0}).`
             ].join('\n');
 
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: pr, body
-            });
+            try {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr, body
+              });
+            } catch (error) {
+              core.warning(`Failed to post comment: ${error.message}`);
+            }
