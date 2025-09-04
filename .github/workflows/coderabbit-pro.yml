@@ -3,7 +3,7 @@ name: CodeRabbit Pro – Policy Gate
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [code-rabbit, test]
+    branches: [main, develop]
 
 permissions:
   contents: read
